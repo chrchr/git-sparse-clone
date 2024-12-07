@@ -1,0 +1,132 @@
+#!/bin/sh
+#
+# Custom Git command to easily clone selected subdirectories from a repository.
+#
+# Copyright (c) 2024 Robert Church
+#
+# This file is licensed under the GPL v2, or the same license as Git
+#
+# Contact: chrchr@gmail.com
+#
+
+USAGE=$(cat <<EOS
+usage: git sparse-clone [<options>] [--] <repo> <subdirectory ...>
+
+    -b, --branch=<branch>
+                          checkout <branch> instead of remote\'s HEAD
+    -d, --directory=<directory>
+                          clone the repository into <directory>
+    --filter / --no-filter
+                          enable/disable object filtering
+    --depth=<depth>
+                          create a shallow clone of that depth
+    --sparse-index / --no-sparse-index
+                          enable/disable the sparse index feature
+    -h, --help
+                          show usage
+EOS
+)
+
+filter="--filter=blob:none"
+branch=""
+directory=""
+depth=""
+index_sparsity="--sparse-index"
+
+show_usage () {
+    echo "$USAGE"
+    exit 1
+}
+
+main () {
+    while test $# != 0
+    do
+	case "$1" in
+	    --branch=*)
+		branch=$1
+		;;
+	    -b|--branch)
+		branch="$1 $2"
+		shift
+		;;
+	    --directory=*)
+		directory="${1#*=}"
+		;;
+	    -d|--directory)
+		directory=$2
+		shift
+		;;
+	    --depth=*)
+		depth=$1
+		;;
+	    --depth)
+		depth=$2
+		shift
+		;;
+	    --no-sparse-index|--sparse-index)
+		index_sparsity=$1
+		;;
+	    --no-filter)
+		filter=""
+		;;
+	    --filter)
+		# This is the default
+		;;
+	    -h|--help)
+		show_usage
+		;;
+	    --)
+		shift
+		break
+		;;
+	    *)
+		break
+	esac
+	shift
+    done
+    repository="$1"
+
+    if test -z "$repository"; then
+	echo "fatal: You must specify a repository to clone."
+	show_usage
+    fi
+    shift
+
+    # The named pipe is used here so that `git clone` can prompt for a
+    # password.
+    tmpdir=$(mktemp -d)
+    trap "test -d $tmpdir && rm -rf $tmpdir" EXIT INT HUP TERM
+    git_clone_output=$(mktemp -up $tmpdir)
+    mkfifo -m600 "$git_clone_output" || exit $?
+    git clone \
+	--no-checkout \
+	$filter \
+	--sparse \
+	$depth \
+	$branch \
+	"$repository" \
+	$directory 2> "$git_clone_output" &
+    git_clone_job=%%
+
+    directory=$(tee /dev/stderr < "$git_clone_output" | grep "Cloning into " - | \
+		    sed -r "s/^Cloning into '(.+)'\.{3}$/\1/" -)
+
+    wait "$git_clone_job"
+    git_exit_code=$?
+    rm -rf "$tmpdir"
+
+    if test -z "$directory" || ! test -d "$directory" || \
+	    test $git_exit_code -gt 0; then
+	exit "$git_exit_code"
+    fi
+
+    save_directory=$(pwd)
+
+    trap "cd \"$save_directory\"" EXIT INT HUP TERM
+    cd "$directory" || exit
+    git sparse-checkout set "$index_sparsity" --cone "$@" || exit $?
+    git checkout || exit $?
+    cd "$save_directory" || exit
+}
+
+main "$@"
